@@ -1,0 +1,138 @@
+import json
+import logging
+from typing import Optional, Any, List
+
+import trackingmore
+import re
+import requests
+
+try:
+    from openhome import MatchingCapability
+    from openhome import editor_logging_handler
+except Exception:
+    class MatchingCapability:
+        def __init__(self, *args, **kwargs):
+            pass
+    def editor_logging_handler():
+        return logging.StreamHandler()
+
+logger = logging.getLogger('package_tracker')
+logger.setLevel(logging.DEBUG)
+try:
+    handler = editor_logging_handler()
+except Exception:
+    handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+if not logger.handlers:
+    logger.addHandler(handler)
+
+class PackageTracker(MatchingCapability):
+    #{{register capability}}
+
+    @classmethod
+    def register_capability(cls) -> "MatchingCapability":
+        config_path = "config.json"
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        unique_name = data.get("unique_name", "package_tracker")
+        hotwords = data.get("matching_hotwords", 
+                            ["track my package", "where's my package", "package status", "tracking"])
+        return cls(unique_name=unique_name, matching_hotwords=hotwords)
+
+    def __init__(self, unique_name: Optional[str] = None, matching_hotwords: Optional[List[str]] = None):
+        try:
+            super().__init__(unique_name=unique_name, matching_hotwords=matching_hotwords)
+        except Exception:
+            try:
+                super().__init__()
+            except Exception:
+                pass
+        self.config_path = 'config.json'
+        self.packages_path = 'packages.json'
+        self.config = self._load_json_sync(self.config_path, default={})
+        api_key = self.config.get('trackingmore_api_key')
+        if api_key:
+            trackingmore.api_key = api_key
+        self.packages = self._load_json_sync(self.packages_path, default={'packages': []}).get('packages', [])
+
+    def _load_json_sync(self, path: str, default: Any):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            logger.error('Failed to load %s: %s', path, e)
+            return default
+
+    def _save_packages_sync(self):
+        try:
+            with open(self.packages_path, 'w', encoding='utf-8') as f:
+                json.dump({'packages': self.packages}, f, indent=2)
+        except Exception as e:
+            logger.error('Failed to save packages.json: %s', e)
+
+    def call(self, worker):
+        self.worker = worker
+        self.capability_worker = type('CapabilityWorker', (), {})()
+        self.worker.session_tasks.create(self.run())
+
+    async def run(self):
+        try:
+            await self.worker.session_tasks.sleep(0.1)
+            await self.capability_worker.speak("Package tracker ready. You can ask about your packages.")
+            user_input = await self.capability_worker.user_response()
+            self._handle_input(user_input)
+        except Exception as e:
+            logger.exception('Error in run: %s', e)
+            await self.capability_worker.speak("Sorry, something went wrong.")
+        finally:
+            self.capability_worker.resume_normal_flow()
+
+    def _handle_input(self, user_input: str):
+        text = (user_input or '').lower()
+        extracted_number = None
+        if user_input:
+            m = re.search(r"\b(\d{8,})\b", user_input)
+            if m:
+                extracted_number = m.group(1)
+
+        if any(x in text for x in ('add', 'track', 'save', 'remember')):
+            intent = 'add'
+        elif any(x in text for x in ('where', 'status', 'check', 'how is')):
+            intent = 'check'
+        elif any(x in text for x in ('list', 'show', 'my packages')):
+            intent = 'list'
+        elif any(x in text for x in ('remove', 'delete', 'forget')):
+            intent = 'remove'
+        else:
+            intent = 'unknown'
+
+        if intent == 'add':
+            self._respond(self.capability_worker, f"Add package called with number {extracted_number}. (Real implementation would create tracking.)")
+        elif intent == 'check':
+            self._respond(self.capability_worker, f"Checking status for {extracted_number}... (real implementation would call TrackingMore)")
+        elif intent == 'list':
+            if not self.packages:
+                self._respond(self.capability_worker, "You have no tracked packages.")
+            else:
+                lines = [f'{p["friendly_name"]}: {p["tracking_number"]}' for p in self.packages]
+                self._respond(self.capability_worker, "Your packages: " + ", ".join(lines))
+        elif intent == 'remove':
+            self._respond(self.capability_worker, f"Removing {extracted_number}...")
+        else:
+            self._respond(self.capability_worker, "I can help you track packages. Try 'track my package'.")
+
+    def _respond(self, capability_worker, text: str):
+        try:
+            if hasattr(capability_worker, 'speak'):
+                capability_worker.speak(text)
+            elif hasattr(capability_worker, 'respond'):
+                capability_worker.respond(text)
+            else:
+                logger.info(text)
+        except Exception as e:
+            logger.error(f"Failed to respond: {e}")
